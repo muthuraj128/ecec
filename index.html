@@ -1,52 +1,219 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>College Attendance Dashboard</title>
-    <link rel="stylesheet" href="style.css">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Attendance Viewer</title>
+  <style>
+    :root { color-scheme: light; }
+    body { font-family: Arial, Helvetica, sans-serif; margin: 0; padding: 16px; background: #f6f6f8; }
+    header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+    h1 { font-size: 20px; margin: 0; }
+    button { padding: 8px 12px; font-size: 14px; border: 1px solid #0d6efd; color: #0d6efd; background: #fff; border-radius: 6px; cursor: pointer; }
+    button:hover { background: #0d6efd; color: #fff; }
+    .card { background: #fff; border: 1px solid #e0e0e5; border-radius: 10px; padding: 12px; box-shadow: 0 2px 6px rgba(0,0,0,0.04); }
+    table { width: 100%; border-collapse: collapse; margin-top: 8px; }
+    th, td { text-align: left; padding: 8px; border-bottom: 1px solid #eee; font-size: 14px; }
+    th { background: #fafafa; }
+    #status { margin-top: 6px; font-size: 13px; color: #444; }
+  </style>
 </head>
 <body>
-    <div class="container">
-        <div class="header">
-            <h1>📚 Attendance Dashboard</h1>
-            <p>Real-time student attendance tracking</p>
-        </div>
-
-        <div class="controls">
-            <div class="record-count">
-                <span id="recordCount">Loading...</span>
-            </div>
-            <button class="refresh-btn" id="refreshBtn">
-                <span class="refresh-icon">↻</span>
-                Refresh
-            </button>
-        </div>
-
-        <div class="error-message" id="errorMessage"></div>
-
-        <div class="table-container">
-            <table id="attendanceTable">
-                <thead>
-                    <tr>
-                        <th>Roll Number</th>
-                        <th>Time</th>
-                    </tr>
-                </thead>
-                <tbody id="tableBody">
-                    <!-- Data will be inserted here -->
-                </tbody>
-            </table>
-            <div class="empty-state" id="emptyState" style="display: none;">
-                <svg viewBox="0 0 24 24" fill="currentColor">
-                    <path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-5 14H7v-2h7v2zm3-4H7v-2h10v2zm0-4H7V7h10v2z"/>
-                </svg>
-                <h3>No Records Found</h3>
-                <p>No attendance data available at the moment.</p>
-            </div>
-        </div>
+  <header>
+    <h1>Attendance Logs</h1>
+    <div style="display:flex;gap:8px;align-items:center">
+      <input type="date" id="singleDate" title="Select date">
+      <button id="filter">Filter</button>
+      <button id="clear">Clear</button>
+      <button id="clearAllHidden" style="display:none;background:#c82333;color:#fff;border:0;padding:6px 10px;border-radius:6px;">Clear All (hidden)</button>
+      <button id="refresh">Refresh</button>
     </div>
+  </header>
+  <div class="card">
+    <div id="status">Ready.</div>
+    <div id="summary" style="margin-top:8px;font-size:14px;color:#222">Present: 0 &nbsp;|&nbsp; Absent: 0</div>
+    <div id="absentList" style="margin-top:8px;font-size:13px;color:#444">Absent roll nos: -</div>
+    <table>
+      <thead>
+        <tr><th>ID</th><th>Name</th><th>Timestamp</th></tr>
+      </thead>
+      <tbody id="rows"></tbody>
+    </table>
+  </div>
 
-    <script src="script.js"></script>
+  <script>
+    // TODO: set these to your Supabase project values
+    const SUPABASE_URL = "https://xdiviprqbmyfgbmkamak.supabase.co";
+    const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhkaXZpcHJxYm15ZmdibWthbWFrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzMyMDIxNzYsImV4cCI6MjA4ODc3ODE3Nn0.LdCNvIUt4TKhUH3ts_dKjsZuYwrVSF_RQHEj4Nlp4uQ";
+
+    const statusEl = document.getElementById('status');
+    const rowsEl = document.getElementById('rows');
+    const summaryEl = document.getElementById('summary');
+    const clearAllBtn = document.getElementById('clearAllHidden');
+    const singleEl = document.getElementById('singleDate');
+    // default to today's local date (avoid UTC offset causing previous-day display)
+    (function(){
+      const t = new Date();
+      const yyyy = t.getFullYear();
+      const mm = String(t.getMonth() + 1).padStart(2, '0');
+      const dd = String(t.getDate()).padStart(2, '0');
+      singleEl.value = `${yyyy}-${mm}-${dd}`;
+    })();
+    const filterBtn = document.getElementById('filter');
+    const clearBtn = document.getElementById('clear');
+
+    function fmtTs(val){
+      if (!val) return '';
+      // Accept numeric milliseconds or ISO timestamp strings
+      const d = (typeof val === 'number') ? new Date(val) : new Date(String(val));
+      if (isNaN(d)) return String(val);
+      return d.toLocaleString();
+    }
+
+    function buildEndpoint(singleDate){
+      // specify the correct relationship to students to avoid ambiguous-relationship error
+      let url = `${SUPABASE_URL}/rest/v1/attendance?select=id,ts,students!attendance_student_fkey(name)&order=ts.desc`;
+      if (singleDate) {
+        const s = new Date(singleDate + 'T00:00:00');
+        const e = new Date(singleDate + 'T00:00:00');
+        e.setDate(e.getDate() + 1);
+        const sIso = s.toISOString();
+        const eIso = e.toISOString();
+        url += `&ts=gte.${encodeURIComponent(sIso)}&ts=lt.${encodeURIComponent(eIso)}`;
+      }
+      return url;
+    }
+
+    let studentsCache = null; // { list: [{id,name}], count }
+
+    async function fetchStudents(){
+      if (studentsCache) return studentsCache;
+      try{
+        const res = await fetch(`${SUPABASE_URL}/rest/v1/students?select=id,name`, {
+          headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` }
+        });
+        if(!res.ok) throw new Error('HTTP ' + res.status);
+        const data = await res.json();
+        const list = Array.isArray(data) ? data : [];
+        studentsCache = { list, count: list.length };
+        return studentsCache;
+      } catch(e){
+        console.warn('Failed to load students list', e);
+        return { list: [], count: null };
+      }
+    }
+
+    async function loadAttendance(singleDate){
+      statusEl.textContent = 'Loading...';
+      rowsEl.innerHTML = '';
+      try{
+        const endpoint = buildEndpoint(singleDate);
+        const res = await fetch(endpoint, {
+          headers: {
+            'apikey': SUPABASE_KEY,
+            'Authorization': `Bearer ${SUPABASE_KEY}`
+          }
+        });
+        if(!res.ok) throw new Error('HTTP ' + res.status + ' ' + (await res.text()));
+        const data = await res.json();
+        if (!Array.isArray(data) || data.length === 0){
+          rowsEl.innerHTML = '<tr><td colspan="3">No records yet</td></tr>';
+        } else {
+          rowsEl.innerHTML = data.map(r => {
+            const name = r.students?.name || '';
+            return `<tr><td>${r.id}</td><td>${name}</td><td>${fmtTs(r.ts)}</td></tr>`;
+          }).join('');
+        }
+
+        // compute present/absent
+        const presentSet = new Set();
+        if (Array.isArray(data)) data.forEach(r => { if (r && r.id) presentSet.add(r.id); });
+        const presentCount = presentSet.size;
+        const students = await fetchStudents();
+        const totalCount = students.count;
+        const absentList = (students.list || []).filter(s => !presentSet.has(s.id));
+        const absentCount = (totalCount == null) ? '–' : Math.max(0, totalCount - presentCount);
+        summaryEl.textContent = `Present: ${presentCount} \u00a0|\u00a0 Absent: ${absentCount}`;
+        // render absent roll nos (show id and short name)
+        if (Array.isArray(absentList) && absentList.length > 0) {
+          const items = absentList.map(s => `${s.id}`);
+          document.getElementById('absentList').textContent = 'Absent roll nos: ' + items.join(', ');
+        } else {
+          document.getElementById('absentList').textContent = 'Absent roll nos: -';
+        }
+        statusEl.textContent = 'Updated at ' + new Date().toLocaleTimeString();
+      } catch(err){
+        statusEl.textContent = 'Error: ' + err.message;
+        rowsEl.innerHTML = '<tr><td colspan="3">Failed to load</td></tr>';
+        summaryEl.textContent = 'Present: 0 \u00a0|\u00a0 Absent: 0';
+        document.getElementById('absentList').textContent = 'Absent roll nos: -';
+      }
+    }
+
+    // UI bindings
+    filterBtn.onclick = () => {
+      const sd = singleEl.value;
+      if (!sd) {
+        statusEl.textContent = 'Select a date to filter';
+        return;
+      }
+      loadAttendance(sd);
+    };
+    clearBtn.onclick = () => {
+      singleEl.value = '';
+      loadAttendance();
+    };
+    document.getElementById('refresh').onclick = () => loadAttendance(singleEl.value);
+
+    // initial load (default to today's date)
+    loadAttendance(singleEl.value);
+    setInterval(() => loadAttendance(singleEl.value), 10000);
+
+    // Hidden Clear All button: reveal with Ctrl+Shift+X
+    (function(){
+      let revealed = false;
+      window.addEventListener('keydown', (e) => {
+        if (e.ctrlKey && e.shiftKey && e.code === 'KeyX') {
+          revealed = !revealed;
+          clearAllBtn.style.display = revealed ? 'inline-block' : 'none';
+          statusEl.textContent = revealed ? 'Dangerous controls revealed' : 'Controls hidden';
+        }
+      });
+
+      clearAllBtn.addEventListener('click', async () => {
+        const confirmation = prompt('Type DELETE to confirm removing ALL attendance rows (irreversible)');
+        if (confirmation !== 'DELETE') {
+          statusEl.textContent = 'Delete cancelled';
+          return;
+        }
+        if (!confirm('Final confirmation: remove ALL rows from attendance table?')) return;
+        statusEl.textContent = 'Deleting all attendance rows...';
+        try {
+          // PostgREST requires a WHERE clause for DELETE; use id not null to remove all rows
+          const res = await fetch(`${SUPABASE_URL}/rest/v1/attendance?id=not.is.null`, {
+            method: 'DELETE',
+            headers: {
+              'apikey': SUPABASE_KEY,
+              'Authorization': `Bearer ${SUPABASE_KEY}`,
+              'Content-Type': 'application/json',
+              'Prefer': 'return=representation'
+            }
+          });
+          const body = await res.text();
+          if (res.ok) {
+            statusEl.textContent = 'All attendance rows deleted';
+            console.log('Delete response:', body);
+            loadAttendance();
+          } else {
+            statusEl.textContent = 'Delete failed: ' + res.status + ' ' + body;
+            console.error('Delete failed', res.status, body);
+          }
+        } catch (err) {
+          statusEl.textContent = 'Delete error: ' + err.message;
+          console.error(err);
+        }
+      });
+    })();
+  </script>
 </body>
 </html>
